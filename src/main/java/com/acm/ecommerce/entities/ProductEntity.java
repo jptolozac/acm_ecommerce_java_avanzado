@@ -3,7 +3,6 @@ package com.acm.ecommerce.entities;
 
 import jakarta.persistence.*;
 import org.hibernate.annotations.SQLDelete;
-import org.springframework.data.relational.core.mapping.Table;
 
 @Entity
 @Table(name = "products")
