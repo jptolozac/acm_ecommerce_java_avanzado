@@ -2,14 +2,15 @@ package com.acm.ecommerce.entities;
 
 
 import jakarta.persistence.*;
+import lombok.Data;
 import org.hibernate.annotations.SQLDelete;
-import org.springframework.data.relational.core.mapping.Table;
+import org.hibernate.annotations.SQLRestriction;
 
 @Entity
 @Table(name = "products")
-@SQLDelete(sql = "UPDATE products SET deleted = true WHERE id=?")
-
-
+@SQLDelete(sql = "UPDATE products SET deleted = true WHERE id=? AND version=?")
+@SQLRestriction("deleted = false")
+@Data
 public class ProductEntity {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
