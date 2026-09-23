@@ -27,7 +27,7 @@ public class UserController {
     }
 
     @Operation(summary = "Create a new user", description = "Creo que es bastante obvio xd creamos un usuario")
-    @GetMapping
+    @PostMapping
     public ResponseEntity<UserDTO.UserResponse> create(@RequestBody UserDTO.UserRequest request) {
         return new ResponseEntity<>(service.create(request), HttpStatus.CREATED);
     }
