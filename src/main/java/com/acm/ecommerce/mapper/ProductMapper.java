@@ -7,7 +7,6 @@ import org.mapstruct.Mapper;
 import org.mapstruct.MappingTarget;
 import org.mapstruct.NullValuePropertyMappingStrategy;
 import org.mapstruct.Mapping;
-import org.mapstruct.factory.Mappers;
 
 @Mapper(componentModel = "spring")
 public interface ProductMapper {
