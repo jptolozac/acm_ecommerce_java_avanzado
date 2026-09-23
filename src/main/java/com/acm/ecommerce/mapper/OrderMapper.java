@@ -1,10 +1,11 @@
 package com.acm.ecommerce.mapper;
 
+import org.mapstruct.Mapper;
+import org.mapstruct.Mapping;
+
 import com.acm.ecommerce.dto.OrderDTO;
 import com.acm.ecommerce.entities.OrderEntity;
 import com.acm.ecommerce.entities.OrderItemEntity;
-import org.mapstruct.Mapper;
-import org.mapstruct.Mapping;
 
 @Mapper(componentModel = "spring")
 public interface OrderMapper {
