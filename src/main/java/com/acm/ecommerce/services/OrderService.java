@@ -1,5 +1,10 @@
 package com.acm.ecommerce.services;
 
+import java.util.List;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
 import com.acm.ecommerce.dto.OrderDTO;
 import com.acm.ecommerce.entities.OrderEntity;
 import com.acm.ecommerce.entities.OrderItemEntity;
@@ -7,11 +12,8 @@ import com.acm.ecommerce.entities.ProductEntity;
 import com.acm.ecommerce.mapper.OrderMapper;
 import com.acm.ecommerce.repository.OrderRepository;
 import com.acm.ecommerce.repository.ProductRepository;
-import lombok.AllArgsConstructor;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
+import lombok.AllArgsConstructor;
 
 @Service
 @AllArgsConstructor
@@ -25,7 +27,7 @@ public class OrderService {
     public OrderDTO.OrderResponse createOrder(OrderDTO.OrderRequest request) {
         OrderEntity order = new OrderEntity();
         order.setUserId(request.userId());
-        
+
         double totalAmount = 0.0;
 
         for (OrderDTO.OrderItemRequest itemRequest : request.items()) {
@@ -37,15 +39,16 @@ public class OrderService {
             }
 
             product.setStock(product.getStock() - itemRequest.quantity());
-            
+
             productRepository.save(product);
 
-            OrderItemEntity orderItem = new OrderItemEntity();
-            orderItem.setOrder(order);
-            orderItem.setProduct(product);
-            orderItem.setQuantity(itemRequest.quantity());
-            orderItem.setPrice(product.getPrice());
-            
+            OrderItemEntity orderItem = OrderItemEntity.builder()
+                    .order(order)
+                    .product(product)
+                    .quantity(itemRequest.quantity())
+                    .price(product.getPrice())
+                    .build();
+
             order.getItems().add(orderItem);
             totalAmount += product.getPrice() * itemRequest.quantity();
         }
