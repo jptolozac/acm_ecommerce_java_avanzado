@@ -2,6 +2,7 @@ package com.acm.ecommerce.controllers;
 
 import com.acm.ecommerce.dto.OrderDTO;
 import com.acm.ecommerce.services.OrderService;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -9,8 +10,9 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
+@Tag(name = "Ordenes", description = "Creación de ordenes")
 @RestController
-@RequestMapping("/orders")
+@RequestMapping("/api/v1/orders")
 @RequiredArgsConstructor
 public class OrderController {
 
