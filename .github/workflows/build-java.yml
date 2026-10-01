@@ -15,6 +15,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    # -----------------------------------------------------------------------
+    # Permisos necesarios para subir (push) la imagen Docker a GitHub Packages
+    # -----------------------------------------------------------------------
+    permissions:
+      contents: read
+      packages: write
     # NOTE: No "services:" block here.
     # PostgreSQL is started inside a step (step 5) so that
     # ${{ secrets.* }} are available when the container is created.
