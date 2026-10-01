@@ -58,6 +58,18 @@ jobs:
             ${{ runner.os }}-gradle-
 
       # ---------------------------------------------------------------
+      # Check if secrets are loading (Debugging)
+      # ---------------------------------------------------------------
+      - name: Verify Secrets Context
+        run: |
+          echo "Verificando si los secrets están llegando al runner..."
+          if [ -z "${{ secrets.DB_PASSWORD }}" ]; then
+            echo "❌ ERROR: DB_PASSWORD está vacío. GitHub no está inyectando el secret."
+          else
+            echo "✅ DB_PASSWORD detectado correctamente."
+          fi
+
+      # ---------------------------------------------------------------
       # 5 Start PostgreSQL via docker run
       # Using a step (not services:) so GitHub Secrets are available.
       # ---------------------------------------------------------------
