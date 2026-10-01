@@ -6,33 +6,26 @@ on:
   pull_request:
     branches: [ "*" ]
 
-# ---------------------------------------------------------------------------
-# Concurrency prevents multiple overlapping runs for the same ref.
-# The most recent run cancels previous ones — saves runner minutes.
-# ---------------------------------------------------------------------------
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# ---------------------------------------------------------------------------
-# Jobs definition.
-#   • build  → compile + test + coverage gate + artifact upload
-# ---------------------------------------------------------------------------
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
-
+      # ---------------------------------------------------------------
+      # 1️⃣ Checkout repository
+      # ---------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # ---------------------------------------------------------------
-      # 2️⃣ Set up JDK 21 (Temurin) and enable Gradle cache.
-      # Using the LTS Temurin distribution ensures a stable, auditable JDK.
+      # 2️⃣ Set up JDK 21 (Temurin)
       # ---------------------------------------------------------------
       - name: Set up JDK 21 (Temurin)
         uses: actions/setup-java@v4
@@ -41,11 +34,15 @@ jobs:
           java-version: "21"
           cache: "gradle"
 
- 
+      # ---------------------------------------------------------------
+      # 3️⃣ Grant execute permission for the Gradle wrapper
+      # ---------------------------------------------------------------
       - name: Grant execute permission for Gradle wrapper
         run: chmod +x ./gradlew
 
-
+      # ---------------------------------------------------------------
+      # 4️⃣ Cache Gradle dependencies
+      # ---------------------------------------------------------------
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
@@ -57,9 +54,9 @@ jobs:
             ${{ runner.os }}-gradle-
 
       # ---------------------------------------------------------------
-      # 5️⃣ Start PostgreSQL via Docker run inside a step.
-      # Using a step (not services:) permite leer los secrets de GitHub
-      # porque aquí el contexto ${{ secrets.* }} ya está disponible.
+      # 5️⃣ Start PostgreSQL using docker run (inside a step).
+      # Using docker run en un step (NO en services:) permite acceder
+      # al contexto ${{ secrets.* }} que no está disponible en services:.
       # ---------------------------------------------------------------
       - name: Start PostgreSQL
         run: |
@@ -71,14 +68,17 @@ jobs:
             -p 5434:5432 \
             postgres:16-alpine
 
-          # Wait until PostgreSQL is ready to accept connections
           echo "Waiting for PostgreSQL to be ready..."
           until docker exec postgres pg_isready -U ${{ secrets.DB_USER }}; do
             sleep 2
           done
           echo "PostgreSQL is ready!"
 
-
+      # ---------------------------------------------------------------
+      # 6️⃣ Build and run tests.
+      # Las variables de entorno sobreescriben application.yaml y
+      # apuntan al contenedor PostgreSQL levantado en el paso anterior.
+      # ---------------------------------------------------------------
       - name: Build and run tests
         env:
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ secrets.DB_NAME }}
@@ -86,6 +86,9 @@ jobs:
           SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: ./gradlew clean build --no-daemon
 
+      # ---------------------------------------------------------------
+      # 7️⃣ Upload test reports — even on failure for debugging
+      # ---------------------------------------------------------------
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -94,6 +97,9 @@ jobs:
           path: build/reports/tests/**
           retention-days: 14
 
+      # ---------------------------------------------------------------
+      # 8️⃣ Upload built JAR artifact
+      # ---------------------------------------------------------------
       - name: Upload build artifact (JAR)
         if: success()
         uses: actions/upload-artifact@v4
@@ -102,6 +108,9 @@ jobs:
           path: build/libs/*.jar
           retention-days: 14
 
+      # ---------------------------------------------------------------
+      # 9️⃣ OPTIONAL: Build and push Docker image (only on push to branch)
+      # ---------------------------------------------------------------
       - name: Build Docker image
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
         run: docker build -t acm-ecommerce:${{ github.sha }} .
@@ -115,8 +124,4 @@ jobs:
           echo ${{ secrets.GITHUB_TOKEN }} | docker login $REGISTRY -u ${{ github.actor }} --password-stdin
           docker tag acm-ecommerce:${{ github.sha }} $REGISTRY/$IMAGE_NAME:${{ github.sha }}
           docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
-
-# ---------------------------------------------------------------------------
-# End of CI workflow
-# ---------------------------------------------------------------------------
 

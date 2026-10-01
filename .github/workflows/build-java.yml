@@ -1,58 +1,27 @@
 name: CI
 
-# ---------------------------------------------------------------------------
-# Trigger the workflow on any push or pull request to any branch.
-# Adjust branches if you prefer to limit to main/release only.
-# ---------------------------------------------------------------------------
 on:
   push:
     branches: [ "*" ]
   pull_request:
     branches: [ "*" ]
 
-# ---------------------------------------------------------------------------
-# Concurrency prevents multiple overlapping runs for the same ref.
-# The most recent run cancels previous ones — saves runner minutes.
-# ---------------------------------------------------------------------------
+# Concurrency: cancel older runs for the same branch/PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# ---------------------------------------------------------------------------
-# Jobs definition.
-#   • build  → compile + test + coverage gate + artifact upload
-# ---------------------------------------------------------------------------
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
-    # -----------------------------------------------------------------------
-    # Service container: PostgreSQL
-    # Best practice: mirror the same DB engine used in production so tests
-    # run against the real driver/dialect instead of an in-memory substitute.
-    # Credentials are read from GitHub Secrets — never hardcoded in the file.
-    # -----------------------------------------------------------------------
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: ${{ secrets.DB_NAME }}
-          POSTGRES_USER: ${{ secrets.DB_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}
-        ports:
-          - 5434:5432
-        # Wait until the DB is accepting connections before the job starts.
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # NOTE: No "services:" block here.
+    # PostgreSQL is started inside a step (step 5) so that
+    # ${{ secrets.* }} are available when the container is created.
 
     steps:
       # ---------------------------------------------------------------
-      # 1️⃣ Checkout repository with full history (required for Gradle
-      # incremental builds and proper version tagging).
+      # 1 Checkout repository
       # ---------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -60,8 +29,7 @@ jobs:
           fetch-depth: 0
 
       # ---------------------------------------------------------------
-      # 2️⃣ Set up JDK 21 (Temurin) and enable Gradle cache.
-      # Using the LTS Temurin distribution ensures a stable, auditable JDK.
+      # 2 Set up JDK 21 (Temurin)
       # ---------------------------------------------------------------
       - name: Set up JDK 21 (Temurin)
         uses: actions/setup-java@v4
@@ -71,16 +39,13 @@ jobs:
           cache: "gradle"
 
       # ---------------------------------------------------------------
-      # 3️⃣ Grant execute permission for the Gradle wrapper.
-      # Required on Linux runners where the file bit may not be set.
+      # 3 Make Gradle wrapper executable
       # ---------------------------------------------------------------
       - name: Grant execute permission for Gradle wrapper
         run: chmod +x ./gradlew
 
       # ---------------------------------------------------------------
-      # 4️⃣ Cache Gradle dependencies and wrapper binaries.
-      # The cache key uses the hash of build files so stale caches are
-      # automatically invalidated when dependencies change.
+      # 4 Cache Gradle dependencies
       # ---------------------------------------------------------------
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
@@ -93,10 +58,28 @@ jobs:
             ${{ runner.os }}-gradle-
 
       # ---------------------------------------------------------------
-      # 5️⃣ Compile the project and run all tests.
-      # The datasource env vars override application.yaml so the tests
-      # connect to the PostgreSQL service container defined above.
-      # --no-daemon avoids leaving background Gradle daemons in CI.
+      # 5 Start PostgreSQL via docker run
+      # Using a step (not services:) so GitHub Secrets are available.
+      # ---------------------------------------------------------------
+      - name: Start PostgreSQL
+        run: |
+          docker run -d \
+            --name postgres \
+            -e POSTGRES_DB=${{ secrets.DB_NAME }} \
+            -e POSTGRES_USER=${{ secrets.DB_USER }} \
+            -e POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }} \
+            -p 5434:5432 \
+            postgres:16-alpine
+
+          echo "Waiting for PostgreSQL to be ready..."
+          until docker exec postgres pg_isready -U ${{ secrets.DB_USER }}; do
+            sleep 2
+          done
+          echo "PostgreSQL is ready!"
+
+      # ---------------------------------------------------------------
+      # 6 Build and run tests
+      # Env vars override application.yaml and point to the container above.
       # ---------------------------------------------------------------
       - name: Build and run tests
         env:
@@ -106,9 +89,7 @@ jobs:
         run: ./gradlew clean build --no-daemon
 
       # ---------------------------------------------------------------
-      # 6️⃣ Upload test reports (HTML + XML) as artifacts.
-      # Using if: always() ensures reports are uploaded even on failure,
-      # which is critical for post-mortem debugging.
+      # 7 Upload test reports (always, even on failure)
       # ---------------------------------------------------------------
       - name: Upload test reports
         if: always()
@@ -119,9 +100,7 @@ jobs:
           retention-days: 14
 
       # ---------------------------------------------------------------
-      # 7️⃣ Upload compiled application artifact (JAR).
-      # Makes the built artifact available for downstream jobs (e.g.,
-      # a deploy job) or for manual download from the Actions UI.
+      # 8 Upload application JAR artifact
       # ---------------------------------------------------------------
       - name: Upload build artifact (JAR)
         if: success()
@@ -132,9 +111,7 @@ jobs:
           retention-days: 14
 
       # ---------------------------------------------------------------
-      # 8️⃣ OPTIONAL: Build and push a Docker image.
-      # Only runs on direct pushes to a branch (not on PRs) to avoid
-      # publishing images from unreviewed code.
+      # 9 OPTIONAL: Build and push Docker image (push events only)
       # ---------------------------------------------------------------
       - name: Build Docker image
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
@@ -149,8 +126,3 @@ jobs:
           echo ${{ secrets.GITHUB_TOKEN }} | docker login $REGISTRY -u ${{ github.actor }} --password-stdin
           docker tag acm-ecommerce:${{ github.sha }} $REGISTRY/$IMAGE_NAME:${{ github.sha }}
           docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
-
-# ---------------------------------------------------------------------------
-# End of CI workflow
-# ---------------------------------------------------------------------------
-
