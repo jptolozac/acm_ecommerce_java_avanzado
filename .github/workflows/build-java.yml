@@ -1,0 +1,133 @@
+name: CI
+
+# ---------------------------------------------------------------------------
+# Trigger the workflow on any push or pull request to any branch.
+# Adjust branches if you prefer to limit to main/release only.
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+
+# ---------------------------------------------------------------------------
+# Concurrency prevents multiple overlapping runs for the same ref.
+# The most recent run cancels previous ones.
+# ---------------------------------------------------------------------------
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# Jobs definition. "build" compiles, runs tests, checks coverage, and
+# publishes artefacts (JAR/WAR, test reports). Optional Docker image build
+# runs only on pushes to a branch (not on PRs).
+# ---------------------------------------------------------------------------
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # ---------------------------------------------------------------
+      # 1️⃣ Checkout repository with full history (required for Gradle
+      # incremental builds and for proper version tagging).
+      # ---------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------
+      # 2️⃣ Set up JDK 21 (Temurin) and enable Gradle cache.
+      # ---------------------------------------------------------------
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "gradle"
+
+      # ---------------------------------------------------------------
+      # 3️⃣ Grant execute permission for the Gradle wrapper.
+      # ---------------------------------------------------------------
+      - name: Grant execute permission for Gradle wrapper
+        run: chmod +x ./gradlew
+
+      # ---------------------------------------------------------------
+      # 4️⃣ Cache Gradle dependencies and wrapper binaries.
+      # ---------------------------------------------------------------
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # ---------------------------------------------------------------
+      # 5️⃣ Build the project and run all tests.
+      # ---------------------------------------------------------------
+      - name: Build and run tests
+        run: ./gradlew clean build --no-daemon
+
+      # ---------------------------------------------------------------
+      # 6️⃣ Verify code‑coverage (JaCoCo) and enforce a minimum threshold.
+      # ---------------------------------------------------------------
+      - name: Verify code coverage
+        run: |
+          ./gradlew jacocoTestReport
+          COVERAGE=$(grep -A1 '<counter type="INSTRUCTION"' build/reports/jacoco/test/jacocoTestReport.xml | grep '<covered' | head -1 | sed -E 's/.*covered=\"([0-9]+)\" missed=\"[0-9]+\".*/\1/')
+          TOTAL=$(grep -A1 '<counter type="INSTRUCTION"' build/reports/jacoco/test/jacocoTestReport.xml | grep '<covered' | head -1 | sed -E 's/.*covered=\"([0-9]+)\" missed=\"([0-9]+)\".*/\1+\2/')
+          PCT=$(( 100 * COVERAGE / TOTAL ))
+          if [ "$PCT" -lt 80 ]; then
+            echo "Code coverage $PCT% is below the required 80%"
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # 7️⃣ Upload test reports (HTML, XML) as artefacts for debugging.
+      # ---------------------------------------------------------------
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: build/reports/tests/**
+
+      # ---------------------------------------------------------------
+      # 8️⃣ Upload compiled application artefacts (JAR/WAR) for downstream use.
+      # ---------------------------------------------------------------
+      - name: Upload build artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-artifact
+          path: |
+            build/libs/*.jar
+            build/libs/*.war
+
+      # ---------------------------------------------------------------
+      # 9️⃣ OPTIONAL: Build and push a Docker image when running on a push
+      # (not on PRs). Image is tagged with the commit SHA.
+      # ---------------------------------------------------------------
+      - name: Build Docker image (optional)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        run: |
+          docker build -t acm-ecommerce:${{ github.sha }} .
+
+      - name: Push Docker image to GHCR (optional)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        env:
+          REGISTRY: ghcr.io
+          IMAGE_NAME: ${{ github.repository }}
+        run: |
+          echo ${{ secrets.GITHUB_TOKEN }} | docker login $REGISTRY -u ${{ github.actor }} --password-stdin
+          docker tag acm-ecommerce:${{ github.sha }} $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+          docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+
+# ---------------------------------------------------------------------------
+# End of CI workflow
+# ---------------------------------------------------------------------------
+
