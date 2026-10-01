@@ -65,17 +65,30 @@ jobs:
         run: |
           docker run -d \
             --name postgres \
-            -e POSTGRES_DB=${{ secrets.DB_NAME }} \
-            -e POSTGRES_USER=${{ secrets.DB_USER }} \
-            -e POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }} \
+            -e POSTGRES_DB="${{ secrets.DB_NAME }}" \
+            -e POSTGRES_USER="${{ secrets.DB_USER }}" \
+            -e POSTGRES_PASSWORD="${{ secrets.DB_PASSWORD }}" \
             -p 5434:5432 \
             postgres:16-alpine
 
           echo "Waiting for PostgreSQL to be ready..."
-          until docker exec postgres pg_isready -U ${{ secrets.DB_USER }}; do
+          for i in {1..15}; do
+            if docker exec postgres pg_isready -U "${{ secrets.DB_USER }}" > /dev/null 2>&1; then
+              echo "PostgreSQL is ready!"
+              exit 0
+            fi
+            # Check if container died
+            if [ "$(docker inspect -f '{{.State.Running}}' postgres)" != "true" ]; then
+              echo "Container stopped unexpectedly. Logs:"
+              docker logs postgres
+              exit 1
+            fi
+            echo "Waiting..."
             sleep 2
           done
-          echo "PostgreSQL is ready!"
+          echo "Timed out waiting for PostgreSQL. Logs:"
+          docker logs postgres
+          exit 1
 
       # ---------------------------------------------------------------
       # 6 Build and run tests
