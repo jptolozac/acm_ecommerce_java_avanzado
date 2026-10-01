@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+
+# ---------------------------------------------------------------------------
+# Concurrency prevents multiple overlapping runs for the same ref.
+# The most recent run cancels previous ones — saves runner minutes.
+# ---------------------------------------------------------------------------
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# Jobs definition.
+#   • build  → compile + test + coverage gate + artifact upload
+# ---------------------------------------------------------------------------
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------
+      # 2️⃣ Set up JDK 21 (Temurin) and enable Gradle cache.
+      # Using the LTS Temurin distribution ensures a stable, auditable JDK.
+      # ---------------------------------------------------------------
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "gradle"
+
+ 
+      - name: Grant execute permission for Gradle wrapper
+        run: chmod +x ./gradlew
+
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # ---------------------------------------------------------------
+      # 5️⃣ Start PostgreSQL via Docker run inside a step.
+      # Using a step (not services:) permite leer los secrets de GitHub
+      # porque aquí el contexto ${{ secrets.* }} ya está disponible.
+      # ---------------------------------------------------------------
+      - name: Start PostgreSQL
+        run: |
+          docker run -d \
+            --name postgres \
+            -e POSTGRES_DB=${{ secrets.DB_NAME }} \
+            -e POSTGRES_USER=${{ secrets.DB_USER }} \
+            -e POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }} \
+            -p 5434:5432 \
+            postgres:16-alpine
+
+          # Wait until PostgreSQL is ready to accept connections
+          echo "Waiting for PostgreSQL to be ready..."
+          until docker exec postgres pg_isready -U ${{ secrets.DB_USER }}; do
+            sleep 2
+          done
+          echo "PostgreSQL is ready!"
+
+
+      - name: Build and run tests
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ secrets.DB_NAME }}
+          SPRING_DATASOURCE_USERNAME: ${{ secrets.DB_USER }}
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: ./gradlew clean build --no-daemon
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: build/reports/tests/**
+          retention-days: 14
+
+      - name: Upload build artifact (JAR)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-artifact
+          path: build/libs/*.jar
+          retention-days: 14
+
+      - name: Build Docker image
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        run: docker build -t acm-ecommerce:${{ github.sha }} .
+
+      - name: Push Docker image to GHCR
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        env:
+          REGISTRY: ghcr.io
+          IMAGE_NAME: ${{ github.repository }}
+        run: |
+          echo ${{ secrets.GITHUB_TOKEN }} | docker login $REGISTRY -u ${{ github.actor }} --password-stdin
+          docker tag acm-ecommerce:${{ github.sha }} $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+          docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+
+# ---------------------------------------------------------------------------
+# End of CI workflow
+# ---------------------------------------------------------------------------
+
