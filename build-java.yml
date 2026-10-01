@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ---------------------------------------------------------------
+      # 1️⃣ Checkout repository
+      # ---------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------
+      # 2️⃣ Set up JDK 21 (Temurin)
+      # ---------------------------------------------------------------
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "gradle"
+
+      # ---------------------------------------------------------------
+      # 3️⃣ Grant execute permission for the Gradle wrapper
+      # ---------------------------------------------------------------
+      - name: Grant execute permission for Gradle wrapper
+        run: chmod +x ./gradlew
+
+      # ---------------------------------------------------------------
+      # 4️⃣ Cache Gradle dependencies
+      # ---------------------------------------------------------------
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # ---------------------------------------------------------------
+      # 5️⃣ Start PostgreSQL using docker run (inside a step).
+      # Using docker run en un step (NO en services:) permite acceder
+      # al contexto ${{ secrets.* }} que no está disponible en services:.
+      # ---------------------------------------------------------------
+      - name: Start PostgreSQL
+        run: |
+          docker run -d \
+            --name postgres \
+            -e POSTGRES_DB=${{ secrets.DB_NAME }} \
+            -e POSTGRES_USER=${{ secrets.DB_USER }} \
+            -e POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }} \
+            -p 5434:5432 \
+            postgres:16-alpine
+
+          echo "Waiting for PostgreSQL to be ready..."
+          until docker exec postgres pg_isready -U ${{ secrets.DB_USER }}; do
+            sleep 2
+          done
+          echo "PostgreSQL is ready!"
+
+      # ---------------------------------------------------------------
+      # 6️⃣ Build and run tests.
+      # Las variables de entorno sobreescriben application.yaml y
+      # apuntan al contenedor PostgreSQL levantado en el paso anterior.
+      # ---------------------------------------------------------------
+      - name: Build and run tests
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ secrets.DB_NAME }}
+          SPRING_DATASOURCE_USERNAME: ${{ secrets.DB_USER }}
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: ./gradlew clean build --no-daemon
+
+      # ---------------------------------------------------------------
+      # 7️⃣ Upload test reports — even on failure for debugging
+      # ---------------------------------------------------------------
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: build/reports/tests/**
+          retention-days: 14
+
+      # ---------------------------------------------------------------
+      # 8️⃣ Upload built JAR artifact
+      # ---------------------------------------------------------------
+      - name: Upload build artifact (JAR)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-artifact
+          path: build/libs/*.jar
+          retention-days: 14
+
+      # ---------------------------------------------------------------
+      # 9️⃣ OPTIONAL: Build and push Docker image (only on push to branch)
+      # ---------------------------------------------------------------
+      - name: Build Docker image
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        run: docker build -t acm-ecommerce:${{ github.sha }} .
+
+      - name: Push Docker image to GHCR
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        env:
+          REGISTRY: ghcr.io
+          IMAGE_NAME: ${{ github.repository }}
+        run: |
+          echo ${{ secrets.GITHUB_TOKEN }} | docker login $REGISTRY -u ${{ github.actor }} --password-stdin
+          docker tag acm-ecommerce:${{ github.sha }} $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+          docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+
