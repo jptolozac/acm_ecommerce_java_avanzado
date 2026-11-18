@@ -1,46 +1,45 @@
 # =============================================================================
-# Pipeline de Integración Continua (CI) - acm_ecommerce_java_avanzado
+# Pipeline CI/CD - acm_ecommerce_java_avanzado
 # -----------------------------------------------------------------------------
-# Flujo:  build ──► test ──┐
-#                          ├──► docker-build ──► security-scan (Trivy) ──► publish (GHCR)
-#         codeql ──────────┘
+#  CI:  build ──► test ──┐
+#                        ├──► docker-build ──► security-scan (Trivy) ──► publish (GHCR)
+#       codeql ──────────┘                                  │
+#  CD (solo push a main):                                   └──► push-ecr (Amazon ECR) ──► deploy (ECS Fargate)
 #
-# Apartados de evaluación implementados:
-#   1. Seguridad integrada: GitHub CodeQL (SAST) + Trivy (escaneo de la imagen)
-#   2. Etiquetado semántico: short-SHA, número de PR, versión SemVer (vX.Y.Z) y latest
+#  - Pull Request a main  -> solo CI (valida el cambio, publica pr-N en GHCR)
+#  - Push a main          -> CI + CD (despliega automáticamente en AWS)
+#  - Tag vX.Y.Z           -> CI + versión semántica en GHCR
 # =============================================================================
-name: CI - Build App
+name: CI/CD - Build & Deploy App
 
 on:
-  # Requisito principal: ejecutar al abrir/actualizar un Pull Request hacia main
   pull_request:
     branches: [ "main", "master" ]
-  # Extra: al publicar un tag vX.Y.Z se genera la imagen con la versión semántica
   push:
+    branches: [ "main" ]              # CD: cada push a main despliega en producción
     tags: [ "v*.*.*" ]
-  # Extra: permite lanzarlo manualmente desde la pestaña Actions
   workflow_dispatch:
 
-# Cancela ejecuciones viejas del mismo PR/rama cuando llega un commit nuevo
+# En PRs se cancelan ejecuciones viejas; en main NUNCA se cancela un despliegue a mitad
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Principio de mínimo privilegio: por defecto solo lectura.
-# Cada job amplía únicamente los permisos que necesita.
 permissions:
   contents: read
 
 env:
-  JAVA_VERSION: "25"            # Debe coincidir con el toolchain de build.gradle
+  JAVA_VERSION: "25"
   JAVA_DISTRIBUTION: "temurin"
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  AWS_REGION: ${{ vars.AWS_REGION }}          # Variables del repositorio (no son secretos)
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # JOB 1: BUILD - compila y genera el JAR (sin ejecutar pruebas)
-  # ---------------------------------------------------------------------------
+  # ===========================================================================
+  #                              INTEGRACIÓN CONTINUA
+  # ===========================================================================
   build:
     name: Build (Gradle)
     runs-on: ubuntu-latest
@@ -54,7 +53,7 @@ jobs:
         with:
           distribution: ${{ env.JAVA_DISTRIBUTION }}
           java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle               # Caché de dependencias de Gradle
+          cache: gradle
 
       - name: Dar permisos de ejecución al wrapper
         run: chmod +x ./gradlew
@@ -69,14 +68,10 @@ jobs:
           path: build/libs/*-SNAPSHOT.jar
           retention-days: 7
 
-  # ---------------------------------------------------------------------------
-  # JOB 2: TEST - ejecuta las pruebas contra un PostgreSQL real.
-  # Las credenciales llegan desde GitHub Secrets (nunca desde el repo).
-  # ---------------------------------------------------------------------------
   test:
     name: Test (JUnit + PostgreSQL)
     runs-on: ubuntu-latest
-    needs: build                      # Solo corre si el build fue exitoso
+    needs: build
     timeout-minutes: 20
     services:
       postgres:
@@ -108,31 +103,26 @@ jobs:
 
       - name: Ejecutar pruebas
         env:
-          # Sobrescriben application.yaml; los valores vienen de Secrets
           SPRING_DATASOURCE_URL: ${{ secrets.SPRING_DATASOURCE_URL }}
           SPRING_DATASOURCE_USERNAME: ${{ secrets.SPRING_DATASOURCE_USERNAME }}
           SPRING_DATASOURCE_PASSWORD: ${{ secrets.SPRING_DATASOURCE_PASSWORD }}
         run: ./gradlew test --no-daemon
 
       - name: Publicar reporte de pruebas
-        if: always()                  # También si fallan, para poder depurar
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-reports
           path: build/reports/tests/
           retention-days: 7
 
-  # ---------------------------------------------------------------------------
-  # JOB 3: CODEQL - análisis estático de seguridad (SAST) del código Java.
-  # Los hallazgos aparecen en la pestaña Security > Code scanning.
-  # ---------------------------------------------------------------------------
   codeql:
     name: Seguridad - CodeQL (SAST)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-      security-events: write          # Necesario para subir resultados a Security
+      security-events: write
       actions: read
     steps:
       - name: Checkout del código
@@ -142,19 +132,14 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: java-kotlin
-          build-mode: none            # Analiza el código fuente sin compilar
-          queries: security-extended  # Reglas de seguridad ampliadas
+          build-mode: none
+          queries: security-extended
 
       - name: Ejecutar análisis CodeQL
         uses: github/codeql-action/analyze@v4
         with:
           category: "/language:java-kotlin"
 
-  # ---------------------------------------------------------------------------
-  # JOB 4: DOCKER BUILD - construye la imagen (aún NO la publica).
-  # Solo corre si las pruebas Y CodeQL fueron exitosos.
-  # Aquí se calculan las etiquetas semánticas.
-  # ---------------------------------------------------------------------------
   docker-build:
     name: Docker - Build de imagen
     runs-on: ubuntu-latest
@@ -173,22 +158,19 @@ jobs:
           name: app-jar
           path: build/libs
 
-      # Etiquetado semántico:
-      #   sha-<7 chars>  -> siempre (permite rollback a un commit exacto)
-      #   pr-<número>    -> en Pull Requests
-      #   1.0.3 / 1.0    -> al hacer push de un tag v1.0.3
-      #   latest         -> solo al publicar una versión (tag vX.Y.Z)
+      # Etiquetas:  sha-<7>  siempre | pr-N en PRs | main en push a main
+      #             1.0.3 / 1.0 / latest al publicar un tag vX.Y.Z
       - name: Calcular etiquetas (metadata)
         id: meta
         uses: docker/metadata-action@v5
         env:
-          # En PRs usa el SHA del último commit de la rama (no el merge commit)
           DOCKER_METADATA_PR_HEAD_SHA: "true"
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=sha,prefix=sha-,format=short
             type=ref,event=pr,prefix=pr-
+            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -214,10 +196,6 @@ jobs:
           path: ${{ runner.temp }}/image.tar
           retention-days: 1
 
-  # ---------------------------------------------------------------------------
-  # JOB 5: SECURITY SCAN - Trivy escanea la imagen ANTES de publicarla.
-  # Falla el pipeline si encuentra vulnerabilidades CRÍTICAS con parche.
-  # ---------------------------------------------------------------------------
   security-scan:
     name: Seguridad - Trivy (imagen)
     runs-on: ubuntu-latest
@@ -269,9 +247,6 @@ jobs:
           exit-code: "1"
           skip-setup-trivy: true
 
-  # ---------------------------------------------------------------------------
-  # JOB 6: PUBLISH - publica la imagen escaneada en GitHub Container Registry
-  # ---------------------------------------------------------------------------
   publish:
     name: Docker - Publicar en GHCR
     runs-on: ubuntu-latest
@@ -279,7 +254,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      packages: write                 # Requerido para escribir en GHCR
+      packages: write
     steps:
       - name: Descargar imagen
         uses: actions/download-artifact@v5
@@ -301,22 +276,134 @@ jobs:
         env:
           TAGS: ${{ needs.docker-build.outputs.tags }}
         run: |
-          echo "Publicando etiquetas:"
           for tag in $TAGS; do
             echo "  -> $tag"
             docker push "$tag"
           done
 
-      - name: Resumen de la publicación
+  # ===========================================================================
+  #                              DESPLIEGUE CONTINUO
+  # Autenticación con AWS por OIDC: GitHub obtiene credenciales TEMPORALES
+  # asumiendo un rol IAM. No hay access keys guardadas en el repositorio.
+  # ===========================================================================
+  push-ecr:
+    name: CD - Publicar en Amazon ECR
+    runs-on: ubuntu-latest
+    needs: [ docker-build, security-scan ]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write                 # Necesario para OIDC con AWS
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      version: ${{ steps.push.outputs.version }}
+    steps:
+      - name: Descargar la imagen YA escaneada por Trivy
+        uses: actions/download-artifact@v5
+        with:
+          name: docker-image
+          path: ${{ runner.temp }}
+
+      - name: Cargar imagen en Docker
+        run: docker load --input ${{ runner.temp }}/image.tar
+
+      - name: Credenciales AWS (OIDC -> rol IAM)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: false
+
+      - name: Login en Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Se reutiliza la MISMA imagen inmutable (build once, deploy many):
+      # solo se re-etiqueta para ECR, no se vuelve a construir.
+      - name: Etiquetar y publicar en ECR
+        id: push
         env:
-          TAGS: ${{ needs.docker-build.outputs.tags }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
-          {
-            echo "## 🐳 Imagen publicada en GHCR"
-            echo ""
-            echo "| Etiqueta |"
-            echo "|---|"
-            for tag in $TAGS; do echo "| \`$tag\` |"; done
-            echo ""
-            echo "Rollback: \`docker pull <imagen>:sha-<commit>\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          VERSION="sha-${GITHUB_SHA::7}"
+          SOURCE="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+          TARGET="${ECR_REGISTRY}/${ECR_REPOSITORY}:${VERSION}"
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$VERSION" >/dev/null 2>&1; then
+            echo "La etiqueta $VERSION ya existe en ECR (tags inmutables): no se vuelve a publicar."
+          else
+            docker tag "$SOURCE" "$TARGET"
+            docker push "$TARGET"
+          fi
+          echo "image=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "### 📦 Imagen en Amazon ECR: \`$TARGET\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: CD - Desplegar en ECS Fargate
+    runs-on: ubuntu-latest
+    needs: push-ecr
+    # Se activa cuando ya existe el servicio ECS (variable ECS_SERVICE configurada)
+    if: vars.ECS_SERVICE != ''
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ vars.APP_URL }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Credenciales AWS (OIDC -> rol IAM)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: false
+
+      - name: Descargar la task definition actual
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${{ vars.ECS_TASK_FAMILY }}" \
+            --query taskDefinition > task-definition.json
+
+      - name: Nueva revisión con la imagen nueva
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ vars.ECS_CONTAINER_NAME }}
+          image: ${{ needs.push-ecr.outputs.image }}
+          environment-variables: |
+            APP_VERSION=${{ needs.push-ecr.outputs.version }}
+
+      - name: Desplegar en ECS (rolling update) y esperar estabilidad
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          service: ${{ vars.ECS_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Smoke test - la URL pública responde con la nueva versión
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          VERSION: ${{ needs.push-ecr.outputs.version }}
+        run: |
+          for i in $(seq 1 18); do
+            BODY=$(curl -fsS "$APP_URL/api/v1/version" || true)
+            echo "Intento $i: $BODY"
+            if echo "$BODY" | grep -q "$VERSION"; then
+              echo "✅ Versión $VERSION desplegada y respondiendo"
+              {
+                echo "## 🚀 Desplegado en AWS ECS Fargate"
+                echo "- URL: $APP_URL"
+                echo "- Versión: \`$VERSION\`"
+                echo "- Respuesta: \`$BODY\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "❌ La URL no respondió con la versión $VERSION"
+          exit 1
